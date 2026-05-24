@@ -15,11 +15,35 @@
 
 do $$
 begin
-  -- Only insert if not already exists
-  if not exists (select 1 from profiles where id = '00000000-0000-0000-0000-000000000001') then
-    insert into profiles (id, display_name, neighbourhood, trust_score, level, total_pts, tier)
-    values ('00000000-0000-0000-0000-000000000001', 'Gebya Seed', 'System', 999, 5, 9999, 'verified');
+  -- Insert into auth.users first (FK parent); profiles trigger will fire after
+  if not exists (select 1 from auth.users where id = '00000000-0000-0000-0000-000000000001') then
+    insert into auth.users (
+      id, instance_id, email, encrypted_password,
+      email_confirmed_at, created_at, updated_at,
+      aud, role, raw_app_meta_data, raw_user_meta_data,
+      confirmation_token, recovery_token, email_change_token_new, email_change
+    ) values (
+      '00000000-0000-0000-0000-000000000001',
+      '00000000-0000-0000-0000-000000000000',
+      'seed@gebya.internal',
+      crypt('not-a-real-password', gen_salt('bf')),
+      now(), now(), now(),
+      'authenticated', 'authenticated',
+      '{"provider":"email","providers":["email"]}'::jsonb,
+      '{"display_name":"Gebya Seed"}'::jsonb,
+      '', '', '', ''
+    );
   end if;
+
+  -- Upsert profile (trigger may have already created it)
+  insert into profiles (id, display_name, neighbourhood, trust_score, level, total_pts, tier)
+  values ('00000000-0000-0000-0000-000000000001', 'Gebya Seed', 'System', 999, 5, 9999, 'verified')
+  on conflict (id) do update
+    set display_name = excluded.display_name,
+        trust_score  = excluded.trust_score,
+        level        = excluded.level,
+        total_pts    = excluded.total_pts,
+        tier         = excluded.tier;
 end $$;
 
 -- ============================================================
