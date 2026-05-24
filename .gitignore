@@ -141,3 +141,19 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# ── Mobile (Expo) ─────────────────────────────────────────────
+mobile/.expo/
+mobile/android/
+mobile/ios/
+mobile/dist/
+
+# ── Python API ────────────────────────────────────────────────
+api/venv/
+api/**/__pycache__/
+api/**/*.pyc
+api/.env
+
+# ── System ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
