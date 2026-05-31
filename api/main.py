@@ -1,10 +1,11 @@
 """
 Gebya API — FastAPI entry point
 """
+import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import optimizer, anomaly, alerts
+from app.routers import optimizer, anomaly, alerts, compare, push
 
 app = FastAPI(
     title="Gebya API",
@@ -14,7 +15,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten for production
+    allow_origins=os.environ.get("ALLOWED_ORIGINS", "*").split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -23,6 +24,8 @@ app.add_middleware(
 app.include_router(optimizer.router, prefix="/optimizer", tags=["optimizer"])
 app.include_router(anomaly.router,   prefix="/anomaly",   tags=["anomaly"])
 app.include_router(alerts.router,    prefix="/alerts",    tags=["alerts"])
+app.include_router(compare.router,   prefix="/compare",   tags=["compare"])
+app.include_router(push.router,      prefix="/push",      tags=["push"])
 
 
 @app.get("/health")

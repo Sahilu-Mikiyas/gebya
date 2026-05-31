@@ -13,27 +13,56 @@ import { useState } from 'react';
 import { supabase } from '@/lib/supabase';
 import { Colors } from '@/constants/colors';
 
-export default function LoginScreen() {
-  const [email,     setEmail]     = useState('');
-  const [sent,      setSent]      = useState(false);
-  const [loading,   setLoading]   = useState(false);
+type Mode = 'signIn' | 'signUp';
 
-  const sendMagicLink = async () => {
-    if (!email.trim()) {
-      Alert.alert('Enter your email first');
+export default function LoginScreen() {
+  const [mode,     setMode]     = useState<Mode>('signIn');
+  const [email,    setEmail]    = useState('');
+  const [password, setPassword] = useState('');
+  const [loading,  setLoading]  = useState(false);
+
+  const submit = async () => {
+    if (!email.trim() || !password) {
+      Alert.alert('Fill in both fields');
       return;
     }
-    setLoading(true);
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim().toLowerCase(),
-      options: { shouldCreateUser: true },
-    });
-    setLoading(false);
+    if (password.length < 6) {
+      Alert.alert('Password must be at least 6 characters');
+      return;
+    }
 
-    if (error) {
-      Alert.alert('Error', error.message);
+    setLoading(true);
+
+    if (mode === 'signIn') {
+      const { error } = await supabase.auth.signInWithPassword({
+        email:    email.trim().toLowerCase(),
+        password,
+      });
+      setLoading(false);
+      if (error) {
+        console.error('[signIn]', error.message);
+        Alert.alert('Sign in failed', error.message);
+      }
+      // Success → onAuthStateChange in _layout.tsx handles navigation automatically.
     } else {
-      setSent(true);
+      const { data, error } = await supabase.auth.signUp({
+        email:    email.trim().toLowerCase(),
+        password,
+      });
+      setLoading(false);
+      if (error) {
+        console.error('[signUp]', error.message);
+        Alert.alert('Sign up failed', error.message);
+      } else if (!data.session) {
+        // Email confirmation is ON in Supabase — user must click the link first.
+        Alert.alert(
+          'Check your email',
+          'We sent a confirmation link to ' + email.trim() +
+          '.\n\nClick it, then come back and Sign In.\n\n' +
+          'Tip: disable "Confirm email" in Supabase → Auth → Providers → Email to skip this.'
+        );
+      }
+      // If session exists (confirm email OFF) → onAuthStateChange navigates automatically.
     }
   };
 
@@ -50,51 +79,66 @@ export default function LoginScreen() {
           <Text style={styles.tagline}>ጉርሻ ዋጋ — Community prices</Text>
         </View>
 
-        {!sent ? (
-          <>
-            <Text style={styles.label}>Sign in / Create account</Text>
-            <TextInput
-              style={styles.input}
-              placeholder="your@email.com"
-              placeholderTextColor={Colors.t4}
-              keyboardType="email-address"
-              autoCapitalize="none"
-              autoComplete="email"
-              value={email}
-              onChangeText={setEmail}
-            />
-            <TouchableOpacity
-              style={[styles.btn, loading && styles.btnDisabled]}
-              onPress={sendMagicLink}
-              disabled={loading}
-              activeOpacity={0.85}
-            >
-              {loading
-                ? <ActivityIndicator color={Colors.bg} />
-                : <Text style={styles.btnText}>Send Magic Link ✉️</Text>}
-            </TouchableOpacity>
-            <Text style={styles.hint}>
-              We'll email you a one-tap sign-in link. No password needed.
+        {/* Mode toggle */}
+        <View style={styles.toggleRow}>
+          <TouchableOpacity
+            style={[styles.toggleBtn, mode === 'signIn' && styles.toggleActive]}
+            onPress={() => setMode('signIn')}
+          >
+            <Text style={[styles.toggleText, mode === 'signIn' && styles.toggleTextActive]}>
+              Sign In
             </Text>
-          </>
-        ) : (
-          <View style={styles.sentBox}>
-            <Text style={styles.sentEmoji}>✉️</Text>
-            <Text style={styles.sentTitle}>Check your email</Text>
-            <Text style={styles.sentBody}>
-              We sent a magic link to{'\n'}
-              <Text style={styles.sentEmail}>{email}</Text>
-              {'\n\n'}Tap the link in the email to sign in.
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.toggleBtn, mode === 'signUp' && styles.toggleActive]}
+            onPress={() => setMode('signUp')}
+          >
+            <Text style={[styles.toggleText, mode === 'signUp' && styles.toggleTextActive]}>
+              Create Account
             </Text>
-            <TouchableOpacity
-              style={styles.resendBtn}
-              onPress={() => setSent(false)}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.resendText}>Use a different email</Text>
-            </TouchableOpacity>
-          </View>
-        )}
+          </TouchableOpacity>
+        </View>
+
+        {/* Inputs */}
+        <TextInput
+          style={styles.input}
+          placeholder="your@email.com"
+          placeholderTextColor={Colors.t4}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoComplete="email"
+          value={email}
+          onChangeText={setEmail}
+        />
+        <TextInput
+          style={styles.input}
+          placeholder="Password (min 6 chars)"
+          placeholderTextColor={Colors.t4}
+          secureTextEntry
+          autoCapitalize="none"
+          autoComplete={mode === 'signUp' ? 'new-password' : 'current-password'}
+          value={password}
+          onChangeText={setPassword}
+        />
+
+        <TouchableOpacity
+          style={[styles.btn, loading && styles.btnDisabled]}
+          onPress={submit}
+          disabled={loading}
+          activeOpacity={0.85}
+        >
+          {loading
+            ? <ActivityIndicator color={Colors.bg} />
+            : <Text style={styles.btnText}>
+                {mode === 'signIn' ? 'Sign In →' : 'Create Account →'}
+              </Text>}
+        </TouchableOpacity>
+
+        <Text style={styles.hint}>
+          {mode === 'signIn'
+            ? "Don't have an account? Tap Create Account above."
+            : 'Already have an account? Tap Sign In above.'}
+        </Text>
       </View>
     </KeyboardAvoidingView>
   );
@@ -112,7 +156,7 @@ const styles = StyleSheet.create({
   },
   logoWrap: {
     alignItems: 'center',
-    marginBottom: 48,
+    marginBottom: 40,
   },
   logoEmoji: {
     fontSize: 64,
@@ -129,11 +173,31 @@ const styles = StyleSheet.create({
     color: Colors.t4,
     marginTop: 4,
   },
-  label: {
-    fontSize: 16,
+  toggleRow: {
+    flexDirection: 'row',
+    backgroundColor: Colors.s2,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: Colors.border,
+    marginBottom: 20,
+    padding: 4,
+  },
+  toggleBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  toggleActive: {
+    backgroundColor: Colors.veggie,
+  },
+  toggleText: {
+    fontSize: 14,
     fontWeight: '600',
-    color: Colors.t2,
-    marginBottom: 12,
+    color: Colors.t3,
+  },
+  toggleTextActive: {
+    color: Colors.bg,
   },
   input: {
     backgroundColor: Colors.s2,
@@ -165,38 +229,5 @@ const styles = StyleSheet.create({
     color: Colors.t4,
     textAlign: 'center',
     lineHeight: 18,
-  },
-  sentBox: {
-    alignItems: 'center',
-    padding: 16,
-  },
-  sentEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
-  },
-  sentTitle: {
-    fontSize: 24,
-    fontWeight: '700',
-    color: Colors.t1,
-    marginBottom: 12,
-  },
-  sentBody: {
-    fontSize: 15,
-    color: Colors.t3,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
-  sentEmail: {
-    color: Colors.veggie,
-    fontWeight: '600',
-  },
-  resendBtn: {
-    marginTop: 28,
-    padding: 12,
-  },
-  resendText: {
-    fontSize: 14,
-    color: Colors.t4,
-    textDecorationLine: 'underline',
   },
 });

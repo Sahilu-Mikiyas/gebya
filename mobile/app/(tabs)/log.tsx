@@ -16,12 +16,19 @@ import {
   Platform,
 } from 'react-native';
 import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
 import { useOfflineStore } from '@/stores/offlineStore';
+import { useToastStore } from '@/stores/toastStore';
+import { optimizeSplit } from '@/lib/api';
 import { Colors, categoryColor, CategoryKey } from '@/constants/colors';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
+import PulseButton from '@/components/PulseButton';
+import AnomalyHint from '@/components/AnomalyHint';
+import GlowyInput from '@/components/GlowyInput';
+import { hap } from '@/lib/haptics';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 interface Item    { id: string; name: string; emoji: string; category: CategoryKey; unit: string }
@@ -47,17 +54,70 @@ async function fetchMarkets(): Promise<Market[]> {
   return data ?? [];
 }
 
+// ── Alert checker (fire-and-forget) ──────────────────────────────────────────
+async function checkAlerts(
+  logId: string, itemId: string, marketId: string, priceEtb: number, userId: string,
+) {
+  try {
+    // Fetch user's active alerts for this item
+    const { data: alerts } = await supabase
+      .from('alerts')
+      .select('id,item_id,market_id,target_price,direction')
+      .eq('user_id', userId)
+      .eq('item_id', itemId)
+      .eq('is_active', true)
+      .is('triggered_at', null);
+
+    if (!alerts?.length) return;
+
+    const res = await fetch(`${process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8000'}/alerts/check`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        new_log: { log_id: logId, item_id: itemId, market_id: marketId, price_etb: priceEtb },
+        alerts:  alerts.map((a) => ({
+          alert_id:     a.id,
+          user_id:      userId,
+          item_id:      a.item_id,
+          market_id:    a.market_id,
+          target_price: a.target_price,
+          direction:    a.direction,
+        })),
+      }),
+    });
+
+    if (!res.ok) return;
+    const { triggered } = await res.json();
+
+    for (const t of triggered) {
+      // Mark alert as triggered in DB
+      await supabase.from('alerts')
+        .update({ triggered_at: new Date().toISOString(), is_active: false })
+        .eq('id', t.alert_id);
+
+      // Show in-app toast — imported via module-level store access
+      useToastStore.getState().showToast(`🔔 Alert: ${t.message}`, 'success');
+    }
+  } catch {
+    // Silent fail — alert checking is non-critical
+  }
+}
+
 // ── Component ────────────────────────────────────────────────────────────────
 export default function LogScreen() {
   const { user }                           = useAuthStore();
   const { isOnline, addPending }           = useOfflineStore();
+  const { showToast }                      = useToastStore();
   const insets                             = useSafeAreaInsets();
+  const queryClient                        = useQueryClient();
+  const router                             = useRouter();
 
   const [selectedItem,   setSelectedItem]  = useState<Item   | null>(null);
   const [selectedMarket, setMarket]        = useState<Market | null>(null);
   const [price,          setPrice]         = useState('');
+  const [unit,           setUnit]          = useState<'kg' | 'piece' | 'bundle'>('kg');
+  const [note,           setNote]          = useState('');
   const [submitting,     setSubmitting]    = useState(false);
-  const [success,        setSuccess]       = useState(false);
 
   const [itemSearch,  setItemSearch]  = useState('');
   const [showItems,   setShowItems]   = useState(false);
@@ -87,26 +147,63 @@ export default function LogScreen() {
         market_id: selectedMarket.id,
         price_etb: priceNum,
         logged_at: new Date().toISOString(),
+        unit,
+        notes:     note.trim() || undefined,
         synced:    false,
       });
       setSubmitting(false);
-      setSuccess(true);
+      reset();
+      hap.success();
+      router.push(`/log-success?item=${encodeURIComponent(selectedItem.name)}&market=${encodeURIComponent(selectedMarket.name)}&price=${priceNum}&online=false` as any);
       return;
     }
 
-    const { error } = await supabase.from('price_logs').insert({
-      item_id:   selectedItem.id,
-      market_id: selectedMarket.id,
-      user_id:   user.id,
-      price_etb: priceNum,
+    // Phase 12-A: Rate limit check (max 5 logs/item/market/user/24h)
+    const { data: withinLimit, error: limitErr } = await supabase.rpc('check_log_rate_limit', {
+      p_user_id: user.id,
+      p_item_id: selectedItem.id,
+      p_market_id: selectedMarket.id,
     });
 
-    setSubmitting(false);
+    if (limitErr) {
+      console.warn('[Rate Limit] Failed to check limit:', limitErr.message);
+    } else if (withinLimit === false) {
+      setSubmitting(false);
+      hap.error();
+      return Alert.alert(
+        'Rate Limit Exceeded',
+        'You have reached the limit of 5 logs for this item at this market in the last 24 hours.'
+      );
+    }
+
+    const { data: logData, error } = await supabase.from('price_logs').insert({
+      item_id:   selectedItem.id,
+      market_id: selectedMarket.id,
+      logged_by: user.id,
+      price_etb: priceNum,
+      unit,
+      notes:     note.trim() || null,
+    }).select('id').single();
 
     if (error) {
+      setSubmitting(false);
+      hap.error();
       Alert.alert('Error', error.message);
     } else {
-      setSuccess(true);
+      // Award +10 points (non-blocking)
+      supabase.rpc('award_points', { p_user_id: user.id, p_points: 10 }).then(() => {
+        queryClient.invalidateQueries({ queryKey: ['profile'] });
+      });
+
+      setSubmitting(false);
+      // Check if any of this user's alerts were triggered
+      checkAlerts(logData?.id ?? '', selectedItem.id, selectedMarket.id, priceNum, user.id);
+
+      const itemName  = selectedItem.name;
+      const mktName   = selectedMarket.name;
+      reset();
+      hap.success();
+      router.push(`/log-success?item=${encodeURIComponent(itemName)}&market=${encodeURIComponent(mktName)}&price=${priceNum}&online=true` as any);
     }
   };
 
@@ -114,28 +211,10 @@ export default function LogScreen() {
     setSelectedItem(null);
     setMarket(null);
     setPrice('');
-    setSuccess(false);
+    setUnit('kg');
+    setNote('');
     setItemSearch('');
   };
-
-  if (success) {
-    return (
-      <View style={[styles.root, styles.center, { paddingTop: insets.top }]}>
-        <Text style={styles.successEmoji}>✅</Text>
-        <Text style={styles.successTitle}>
-          {isOnline ? 'Price logged!' : 'Saved offline'}
-        </Text>
-        <Text style={styles.successSub}>
-          {isOnline
-            ? `+10 pts · ${selectedItem?.name} at ${selectedMarket?.name}`
-            : 'Will sync when you\'re back online'}
-        </Text>
-        <TouchableOpacity style={styles.btn} onPress={reset}>
-          <Text style={styles.btnText}>Log another</Text>
-        </TouchableOpacity>
-      </View>
-    );
-  }
 
   return (
     <KeyboardAvoidingView
@@ -160,17 +239,14 @@ export default function LogScreen() {
           style={styles.picker}
           onPress={() => { setShowItems(!showItems); setShowMarkets(false); }}
         >
-          <Text style={selectedItem ? styles.pickerValue : styles.pickerPlaceholder}>
-            {selectedItem ? `${selectedItem.emoji} ${selectedItem.name}` : 'Choose item...'}
-          </Text>
+          <Text style={selectedItem ? styles.pickerValue : styles.pickerPlaceholder}>{selectedItem ? `${selectedItem.emoji} ${selectedItem.name}` : 'Choose item...'}</Text>
           <Text style={styles.chevron}>{showItems ? '▲' : '▼'}</Text>
         </TouchableOpacity>
         {showItems && (
           <View style={styles.dropdown}>
-            <TextInput
+            <GlowyInput
               style={styles.searchInput}
               placeholder="Search items..."
-              placeholderTextColor={Colors.t4}
               value={itemSearch}
               onChangeText={setItemSearch}
             />
@@ -201,9 +277,7 @@ export default function LogScreen() {
           style={styles.picker}
           onPress={() => { setShowMarkets(!showMarkets); setShowItems(false); }}
         >
-          <Text style={selectedMarket ? styles.pickerValue : styles.pickerPlaceholder}>
-            {selectedMarket ? `${selectedMarket.name} — ${selectedMarket.sub_city}` : 'Choose market...'}
-          </Text>
+          <Text style={selectedMarket ? styles.pickerValue : styles.pickerPlaceholder}>{selectedMarket ? `${selectedMarket.name} — ${selectedMarket.sub_city}` : 'Choose market...'}</Text>
           <Text style={styles.chevron}>{showMarkets ? '▲' : '▼'}</Text>
         </TouchableOpacity>
         {showMarkets && (
@@ -218,7 +292,7 @@ export default function LogScreen() {
                   ]}
                   onPress={() => { setMarket(m); setShowMarkets(false); }}
                 >
-                  <Text style={styles.dropItemText}>🏪 {m.name}</Text>
+                  <Text style={styles.dropItemText}>{`🏪 ${m.name}`}</Text>
                   <Text style={styles.dropItemUnit}>{m.sub_city}</Text>
                 </TouchableOpacity>
               ))}
@@ -227,9 +301,7 @@ export default function LogScreen() {
         )}
 
         {/* PRICE INPUT */}
-        <Text style={styles.fieldLabel}>
-          Price (ETB){selectedItem && ` per ${selectedItem.unit}`}
-        </Text>
+        <Text style={styles.fieldLabel}>{`Price (ETB)${selectedItem ? ` per ${selectedItem.unit}` : ''}`}</Text>
         <View style={styles.priceRow}>
           <Text style={styles.currency}>ETB</Text>
           <TextInput
@@ -241,18 +313,62 @@ export default function LogScreen() {
             onChangeText={setPrice}
           />
         </View>
+        {/* Anomaly hint — shown when FastAPI is available */}
+        <AnomalyHint
+          itemId={selectedItem?.id ?? null}
+          marketId={selectedMarket?.id ?? null}
+          price={price}
+        />
+
+        {/* UNIT TOGGLE */}
+        <Text style={styles.fieldLabel}>Unit</Text>
+        <View style={styles.segControl}>
+          {(['kg', 'piece', 'bundle'] as const).map((u) => (
+            <TouchableOpacity
+              key={u}
+              style={[styles.segBtn, unit === u && styles.segBtnOn]}
+              onPress={() => setUnit(u)}
+              activeOpacity={0.7}
+            >
+              <Text style={[styles.segLabel, unit === u && styles.segLabelOn]}>
+                {u === 'kg' ? 'Per kg' : u === 'piece' ? 'Per piece' : 'Per bundle'}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        {/* PRICE PREVIEW */}
+        {price !== '' && !isNaN(parseFloat(price)) && parseFloat(price) > 0 && (
+          <View style={styles.previewCard}>
+            <Text style={styles.previewTitle}>Price Preview</Text>
+            <Text style={styles.previewPrice}>{`${parseFloat(price).toFixed(0)} ETB / ${unit}${unit === 'kg' ? ` = ${(parseFloat(price) / 10).toFixed(1)} ETB per 100g` : ''}`}</Text>
+            <Text style={styles.previewPts}>You'll earn +10 pts ✨</Text>
+          </View>
+        )}
+
+        {/* NOTE */}
+        <Text style={styles.fieldLabel}>Note (optional)</Text>
+        <GlowyInput
+          style={styles.noteInput}
+          placeholder="e.g. Very fresh, near entrance stall"
+          value={note}
+          onChangeText={setNote}
+          maxLength={140}
+          multiline
+        />
 
         {/* SUBMIT */}
-        <TouchableOpacity
-          style={[styles.btn, submitting && styles.btnDisabled]}
-          onPress={submit}
-          disabled={submitting}
-          activeOpacity={0.85}
-        >
-          {submitting
-            ? <ActivityIndicator color={Colors.bg} />
-            : <Text style={styles.btnText}>Submit Price +10 pts</Text>}
-        </TouchableOpacity>
+        {submitting ? (
+          <View style={[styles.btn, { opacity: 0.6 }]}>
+            <ActivityIndicator color={Colors.bg} />
+          </View>
+        ) : (
+          <PulseButton
+            label="Submit Price ✓ +10 pts"
+            onPress={submit}
+            style={{ marginTop: 28 }}
+          />
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
@@ -280,10 +396,21 @@ const styles = StyleSheet.create({
   priceRow:   { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.s2, borderRadius: 12, borderWidth: 1, borderColor: Colors.border },
   currency:   { paddingHorizontal: 14, fontSize: 15, color: Colors.birr, fontWeight: '700' },
   priceInput: { flex: 1, padding: 14, fontSize: 24, fontWeight: '800', color: Colors.t1 },
+  // Unit toggle
+  segControl: { flexDirection: 'row', backgroundColor: Colors.s2, borderRadius: 10, borderWidth: 1, borderColor: Colors.border, overflow: 'hidden' },
+  segBtn:     { flex: 1, padding: 11, alignItems: 'center' },
+  segBtnOn:   { backgroundColor: Colors.veggie },
+  segLabel:   { fontSize: 12, fontWeight: '700', color: Colors.t4 },
+  segLabelOn: { color: Colors.bg },
+  // Price preview
+  previewCard:  { backgroundColor: Colors.s2, borderRadius: 12, borderWidth: 1, borderColor: Colors.veggie + '30', padding: 14, marginTop: 10, gap: 4 },
+  previewTitle: { fontSize: 10, fontWeight: '800', color: Colors.t5, textTransform: 'uppercase', letterSpacing: 0.5 },
+  previewPrice: { fontSize: 15, fontWeight: '700', color: Colors.t1 },
+  previewPts:   { fontSize: 12, color: Colors.deal, fontWeight: '600' },
+  // Note
+  noteInput:    { backgroundColor: Colors.s2, borderRadius: 12, borderWidth: 1, borderColor: Colors.border, padding: 14, color: Colors.t1, fontSize: 14, minHeight: 80, textAlignVertical: 'top' },
+  // Submit
   btn:        { backgroundColor: Colors.veggie, borderRadius: 14, padding: 18, alignItems: 'center', marginTop: 28 },
   btnDisabled:{ opacity: 0.6 },
   btnText:    { fontSize: 16, fontWeight: '700', color: Colors.bg },
-  successEmoji: { fontSize: 72, marginBottom: 16 },
-  successTitle: { fontSize: 26, fontWeight: '800', color: Colors.t1, marginBottom: 8 },
-  successSub:   { fontSize: 14, color: Colors.t4, textAlign: 'center', marginBottom: 32 },
 });
