@@ -2,6 +2,11 @@
 Gebya API — FastAPI entry point
 """
 import os
+import sys
+
+# Ensure Vercel's Python environment can resolve local module imports from the api folder
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
