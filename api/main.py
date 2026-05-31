@@ -33,6 +33,16 @@ app.include_router(compare.router,   prefix="/compare",   tags=["compare"])
 app.include_router(push.router,      prefix="/push",      tags=["push"])
 
 
+@app.get("/")
+def read_root():
+    return {
+        "message": "Welcome to the Gebya API",
+        "status": "online",
+        "documentation": "/docs",
+        "version": "0.1.0"
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "gebya-api"}
