@@ -143,10 +143,10 @@ vite.config.ts.timestamp-*
 .vite/
 
 # ── Mobile (Expo) ─────────────────────────────────────────────
-mobile/.expo/
-mobile/android/
-mobile/ios/
-mobile/dist/
+.expo/
+android/
+ios/
+dist/
 
 # ── Python API ────────────────────────────────────────────────
 api/venv/
